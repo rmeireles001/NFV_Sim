@@ -7,14 +7,7 @@ class cpu:
         self.n_cores = n_cores
         self.core = clock
         self.threads = 2
- 
-class interface:
-    def __init__(self, mac_addr, net_addr, net_mask, ip_addr, ip_mask):
-        self.mac_addr = mac_addr
-        self.net_addr = net_addr
-        self.net_mask = net_mask
-        self.ip_addr = ip_addr
-        self.ip_mask = ip_mask
+
  
 class blade:
     def __init__(self, n_cpu, ram, n_ssd, n_interfaces, hostname):
@@ -40,14 +33,10 @@ class blade:
     def ssd_setup(self, capacity):
         if len(self.ssds) < self.n_ssd:
             self.ssds.append(capacity)
+            self.available_resources()
         else:
             print("You cannot add more SSDs")
- 
-    def interface_setup(self, mac_addr, net_addr, net_mask, ip_addr, ip_mask):
-        if len(self.interfaces) < self.n_interfaces:
-            self.interfaces.append(interface(mac_addr, net_addr, net_mask, ip_addr, ip_mask))
-        else:
-            print("You cannot add more interfaces")
+
  
     def lst_blade(self):
         print("\nHostname: "+self.hostname+"\n-----------------------------------\n")
@@ -74,6 +63,7 @@ class blade:
             sum_cpu = sum_cpu + cpu.n_cores
         for ssd in self.ssds:
             sum_ssd = sum_ssd + ssd
+        print(sum_ssd)
         self.resource['ram'] = self.ram
         self.resource['cpu'] = sum_cpu
         self.resource['ssd'] = sum_ssd
@@ -84,7 +74,7 @@ class blade:
             sum_cpu = sum_cpu + cpu.n_cores
         for ssd in self.ssds:
             sum_ssd = sum_ssd + ssd
-        return [self.ram, sum_cpu, sum_ssd]
+        return {'ram': self.ram, 'cpu': sum_cpu, 'ssd': sum_ssd}
  
 class hypervisor:
     def __init__(self):
@@ -147,6 +137,10 @@ class hypervisor:
                 print("Insert an existent hostname!")
                 return 0
         vmm = self.datacenter[datacenter][hostname]
+        if vmm.resource['ssd'] - storage < 0 :
+            print(vmm.resource['ssd'])
+            print("No enough storage in Host machine")
+            exit(1)
         if n_cpu > vmm.n_cpu:
             print("Guest cannot have more CPUs than host")
             exit(1)
@@ -165,31 +159,9 @@ class hypervisor:
         for i in range(0, n_cpu):
             new_vm.cpu_setup(clock, core)
         new_vm.ssd_setup(storage)
+        vmm.resource['ssd'] = vmm.resource['ssd'] - storage
         self.vms[datacenter][hostname][guestname] = new_vm
-        #new_vm_resources = new_vm.resources_clock()
-        #if new_vm_resources[0] > self.best_resource['ram']:
-        #    self.best_resource['ram'] = new_vm_resources[0]
-        #if new_vm_resources[1] > self.best_resource['cpu']:
-        #    self.best_resource['cpu'] = new_vm_resources[1]
-        #if new_vm_resources[2] > self.best_resource['ssd']:
-        #    self.best_resource['ssd'] = new_vm_resources[2]
 
-    def best_VM(self, weight_cpu, weight_ram, weight_ssd):
-        vmnames = []
-        vmweights = []
-        for key, value in self.vms.items():
-            print(key)
-            for key2, value2 in value.items():
-                print(key2)
-                for key3, value3 in value2.items():
-                    temp = value3.resources_clock()
-                    vmweights.append((temp[0]/self.best_resource['ram'])*weight_ram+(temp[1]/self.best_resource['cpu'])*weight_cpu+(temp[2]/self.best_resource['ssd'])*weight_ssd)
-                    #vmweights.append((temp[0])*weight_ram+(temp[1])*weight_cpu+(temp[2])*weight_ssd)
-                    vmnames.append([key3,key2,key])
-        min_value = max(vmweights)
-        vm_min = vmweights.index(min_value)
-        print(vmweights)
-        return vmnames[vm_min]
     def best_blade(self, weight_cpu, weight_ram, weight_ssd):
         vmnames = []
         vmweights = []
@@ -239,6 +211,13 @@ class hypervisor:
                     list.append([k, key])
         return list
     
+    def rr_list(self):
+        list = []
+        for key, value in self.datacenter.items():
+            for k, host in value.items():
+                list.append([k, key])
+        return list
+    
     def affinity_check(self, type, affinity, dc, host):
         affinity_var = 0
         for s in self.datacenter[dc][host].active_vms:
@@ -285,12 +264,6 @@ class vm:
             self.ssds.append(capacity)
         else:
             print("You cannot add more SSDs")
- 
-    def interface_setup(self, mac_addr, net_addr, net_mask, ip_addr, ip_mask):
-        if len(self.interfaces) < self.n_interfaces:
-            self.interfaces.append(interface(mac_addr, net_addr, net_mask, ip_addr, ip_mask))
-        else:
-            print("You cannot add more interfaces")
  
     def lst_vm(self):
         print("Hostname: "+self.hostname)
@@ -348,10 +321,11 @@ class vnf:
         self.wssd = 0
         self.anti_affinity = 0
         self.scale_factor = 0
+        self.aa_counter = 0
+        self.na_counter = 0
         self.anti_affinity_list = []
-    def add_module(self, id, type):
+    def add_module_rr_af(self, id, type):
         if(len(self.anti_affinity_list)==0):
-            print("foi")
             self.anti_affinity_list = self.hypervisor.rr_affinity_list(self.name,self.anti_affinity)
         flag_affinity = 1
         while(flag_affinity):
@@ -359,6 +333,26 @@ class vnf:
                 host = self.anti_affinity_list[0]
                 self.anti_affinity_list.pop(0)
                 if(self.hypervisor.check_blade_resources(self.vcpus, self.ram, self.ssd, host[0], host[1]) and self.hypervisor.affinity_check(type, self.anti_affinity, host[1], host[0])):
+                    self.modules[type+str(id)] = module(id, type, type+str(id), host[0], host[1])
+                    clock = self.hypervisor.datacenter[host[1]][host[0]].cpus[0].core
+                    self.hypervisor.add_vm(1,self.vcpus,clock,self.ram,self.ssd,1,type+str(id), host[0], host[1])
+                    self.hypervisor.powerOnVM(type+str(id), host[0], host[1])
+                    self.hypervisor.vms[host[1]][host[0]][type+str(id)].type = type
+                    print(type+str(id)+" "+host[1]+" "+host[0]+" added by Round-Robin")
+                    return 1
+            else:
+                flag_affinity = 0
+        print("Impossible to allocate according to this Anti-Affinity policy")
+        return 0
+    def add_module_rr_naf(self, id, type):
+        if(len(self.anti_affinity_list)==0):
+            self.anti_affinity_list = self.hypervisor.rr_list()
+        flag_affinity = 1
+        while(flag_affinity):
+            if(self.anti_affinity_list):
+                host = self.anti_affinity_list[0]
+                self.anti_affinity_list.pop(0)
+                if(self.hypervisor.check_blade_resources(self.vcpus, self.ram, self.ssd, host[0], host[1])):
                     self.modules[type+str(id)] = module(id, type, type+str(id), host[0], host[1])
                     clock = self.hypervisor.datacenter[host[1]][host[0]].cpus[0].core
                     self.hypervisor.add_vm(1,self.vcpus,clock,self.ram,self.ssd,1,type+str(id), host[0], host[1])
@@ -385,13 +379,7 @@ class vnf:
     
     def num_vcpus(self):
         return len(self.modules)*self.vcpus
-
-
-        #if hypervisor.check_host(guestname, hostname, datacenter):
-        #    self.modules[type+str(id)] = module(id, type, hostname, datacenter)
-        #    print("Module successfully added!!")
-        #else:
-        #    print("Please, insert an existent VM!!")
+    
     def config_params(self, vcpus, ram, ssd, wvcpus, wrap, wssd, anti_affinity):
         self.vcpus = vcpus
         self.ram = ram
@@ -409,6 +397,8 @@ class slice:
         self.hypervisor = hypervisor
         self.subscribers = 0
         self.name = name
+        self.aa_counter = 0
+        self.naa_counter = 0
     def add_vnf(self, name):
         vnff = vnf(name, self.hypervisor)
         self.vnfs[name] = vnff
@@ -417,38 +407,6 @@ class slice:
             print(self.vnfs[s].name)
     def add_subscriber(self):
         self.subscribers = self.subscribers + 1 
-class route_entry:
-    def __init__(self, interface_addr, interface_port, hop_addr, hop_port, cost):
-        self.interface_addr = interface_addr
-        self.interface_port = interface_port
-        self.hop_addr = hop_addr
-        self.hop_port = hop_port
-        self.cost = cost
-
-class router:
-    def __init__(self, n_interfaces):
-        self.n_interfaces = n_interfaces
-        self.interfaces = []
-        self.route_table = []
-
-    def add_route(self, interface_addr, interface_port, hop_addr, hop_port, cost):
-        self.route_table.append(route_entry(interface_addr, interface_port, hop_addr, hop_port, cost))
-
-def scale_procedure(slice, vnf, k_scale):
-    if slice.subscribers > vnf.num_vcpus()/k_scale:
-        print(slice.name)
-        i = len(vnf.modules)
-        flag_affinity = vnf.add_module(i,vnf.name)
-        if(flag_affinity==1):
-            print(vnf.name+" added successfully by Round-Robin")
-            return 1
-        flag_resources = vnf.add_module_greedy(i, vnf.name)
-        if(flag_resources==1):
-            print(vnf.name+" added violating anti-affinity rules")
-            return 1
-        print("your datacenter has no free resources. Add more blades, please")
-    return 0 
-
 
 hyper = hypervisor()
 dc = "datacenter_default"
@@ -460,22 +418,10 @@ for i in range(0,20):
     blade_tmp.ssd_setup(10240)
     hyper.add_server(dc,blade_tmp)
 
-
-#core5g = slice(hyper)
-#core5g.add_vnf("AMF")
-#core5g.vnfs["AMF"].config_params(12,32,512,1,1,1,10)
-#for i in range (0,20):
-#    core5g.vnfs["AMF"].add_module(i+1,"AMF")
-#core5g.add_vnf("SMF")
-#core5g.vnfs["SMF"].config_params(12,32,512,1,1,1,1)
-#core5g.list_vnfs()
-#for i in core5g.vnfs["AMF"].modules:
-#    print(core5g.vnfs["AMF"].modules[i].guestname+"\t"+core5g.vnfs["AMF"].modules[i].hostname+"\t"+core5g.vnfs["AMF"].modules[i].datacenter+"\t"+str(core5g.vnfs["AMF"].num_vcpus()))
-
 eMBBvideo = slice(hyper, "eMBB Video")
 eMBBvoice = slice(hyper, "eMBB Voice")
 
-af = 1
+af = 2
 
 critical = random.randrange(8,11)
 high = random.randrange(6,8)
@@ -538,7 +484,7 @@ eMBBvoice.vnfs['NRF'].config_params(3,3,6,3,5,7,af)
 eMBBvoice.vnfs['NRF'].scale_factor = moderate
 
 slices = [eMBBvideo, eMBBvoice]
-
+loop_times = 0
 loop = 1
 while loop:
     new_subs = random.random()
@@ -549,26 +495,58 @@ while loop:
         eMBBvoice.add_subscriber()
     for s in slices:
         for key, vnfs in s.vnfs.items():
-            #print(vnfs.num_vcpus(), key)
             if s.subscribers > (vnfs.num_vcpus()/(vnfs.scale_factor*pow(10,-4))):
-                print(s.name)
                 i = len(vnfs.modules)
-                flag_affinity = vnfs.add_module(i,vnfs.name) #Tenta adicionar por Round-Robbin #fica a dica de especificar
+                flag_affinity = vnfs.add_module_rr_af(i,vnfs.name) #Tenta adicionar por Round-Robbin #fica a dica de especificar
                 if(flag_affinity==0):
-                    flag_resources = vnfs.add_module_greedy(i,vnfs.name)
+                    flag_resources = vnfs.add_module_rr_naf(i,vnfs.name)
                     if(flag_resources==0):
                         print("your datacenter has no free resources. Add more blades, please")
-                        #for i in eMBBvideo.vnfs["AMF"].modules:
-                        #    print(eMBBvideo.vnfs["AMF"].modules[i].guestname+"\t"+eMBBvideo.vnfs["AMF"].modules[i].hostname+"\t"+eMBBvideo.vnfs["AMF"].modules[i].datacenter+"\t"+str(eMBBvideo.vnfs["AMF"].num_vcpus()))
-                        #for i in eMBBvideo.vnfs["SMF"].modules:
-                        #    print(eMBBvideo.vnfs["SMF"].modules[i].guestname+"\t"+eMBBvideo.vnfs["SMF"].modules[i].hostname+"\t"+eMBBvideo.vnfs["SMF"].modules[i].datacenter+"\t"+str(eMBBvideo.vnfs["SMF"].num_vcpus()))
-                        #exit(1)
+                        print("Slice: "+s.name+", VNF: "+vnfs.name+"#"+str(i)+" failed to be added")
                         loop = 0
                         break
+                    else:
+                        print("Slice: "+s.name+", VNF: "+vnfs.name+"#"+str(i)+" added breaking Anti-Affinity rules")
+                        s.naa_counter = s.naa_counter + 1
+                        vnfs.na_counter = vnfs.na_counter + 1 
+                else:
+                    print("Slice: "+s.name+", VNF: "+vnfs.name+"#"+str(i)+" added following Anti-Affinity rules")
+                    s.aa_counter = s.aa_counter + 1
+                    vnfs.aa_counter = vnfs.aa_counter + 1 
+    loop_times = loop_times + 1
+
+#while loop:
+#    new_subs = random.random()
+#
+#    if new_subs < 0.8:
+#        eMBBvideo.add_subscriber()
+#    else:
+#        eMBBvoice.add_subscriber()
+#    for s in slices:
+#        for key, vnfs in s.vnfs.items():
+#            if s.subscribers > (vnfs.num_vcpus()/(vnfs.scale_factor*pow(10,-4))):
+#                print(s.name)
+#                i = len(vnfs.modules)
+#                flag_affinity = vnfs.add_module_rr_af(i,vnfs.name) #Tenta adicionar por Round-Robbin #fica a dica de especificar
+#                if(flag_affinity==0):
+#                    flag_resources = vnfs.add_module_greedy(i,vnfs.name)
+#                    if(flag_resources==0):
+#                        print("your datacenter has no free resources. Add more blades, please")
+#                        loop = 0
+#                        break
 
 for s in slices:
-    print(s.name+" "+str(s.subscribers)+" subscribers")
+    print(f'Slice {s.name}')
     for key, vnfs in s.vnfs.items():
         for i in vnfs.modules:
             print(vnfs.modules[i].guestname+"\t"+vnfs.modules[i].hostname+"\t"+vnfs.modules[i].datacenter+"\t"+str(vnfs.num_vcpus()))
 
+print(f'Number of runs {loop_times}')
+
+for s in slices:
+    print(f'{s.name} {s.subscribers} subscribers\n{s.aa_counter} VMs added following AA rules\n{s.naa_counter} VMs added breaking AA rules')
+    for key, vnfs in s.vnfs.items():
+        print(f'{vnfs.name}: AA - {vnfs.aa_counter}: NAA - {vnfs.na_counter}')
+for d in hyper.datacenter:
+    for b in hyper.datacenter[d]:
+        print(d, b, hyper.datacenter[d][b].resource, hyper.datacenter[d][b].resources_clock())
